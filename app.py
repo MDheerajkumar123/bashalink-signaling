@@ -102,7 +102,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# callId -> call session data
+# callId -> call session
 calls = {}
 
 # -----------------------------
@@ -144,56 +144,49 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
         await ws.close()
         return
 
+    call = calls[call_id]
+
     try:
+        # First message must be JOIN
         join_data = await ws.receive_json()
 
-        phone = join_data["phone"]
-        speak_lang = join_data["speakLang"]
-
-        call = calls[call_id]
-
-        # Only caller or callee allowed
-        if phone not in [call["caller"], call["callee"]]:
+        if join_data.get("type") != "join":
             await ws.close()
             return
 
-        user = {
-            "ws": ws,
-            "phone": phone,
-            "speakLang": speak_lang
-        }
+        # Add participant
+        call["participants"].append(ws)
 
-        call["participants"].append(user)
+        # ❌ More than 2 users not allowed
+        if len(call["participants"]) > 2:
+            await ws.send_json({ "type": "room-full" })
+            await ws.close()
+            return
 
-        # If 2 users joined
+        # ✅ If 2 users connected
         if len(call["participants"]) == 2:
-            u1, u2 = call["participants"]
+            caller_ws = call["participants"][0]
 
-            # Auto language mapping
-            await u1["ws"].send_json({
-                "type": "match-ok",
-                "otherLang": u2["speakLang"]
+            # Tell first user to create offer
+            await caller_ws.send_json({
+                "type": "ready"
             })
 
-            await u2["ws"].send_json({
-                "type": "match-ok",
-                "otherLang": u1["speakLang"]
-            })
-
-        # Relay signaling messages
+        # -------------------------
+        # SIGNALING RELAY
+        # -------------------------
         while True:
             data = await ws.receive_text()
 
             for peer in call["participants"]:
-                if peer["ws"] != ws:
-                    await peer["ws"].send_text(data)
+                if peer != ws:
+                    await peer.send_text(data)
 
     except WebSocketDisconnect:
         if call_id in calls:
             calls[call_id]["participants"] = [
-                u for u in calls[call_id]["participants"] if u["ws"] != ws
+                p for p in calls[call_id]["participants"] if p != ws
             ]
 
             if not calls[call_id]["participants"]:
                 del calls[call_id]
-

@@ -102,11 +102,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# callId -> call session
 calls = {}
+online_users = {}
 
 # -----------------------------
-# REQUEST MODEL
+# MODEL
 # -----------------------------
 class StartCallRequest(BaseModel):
     callerId: str
@@ -114,10 +114,28 @@ class StartCallRequest(BaseModel):
 
 
 # -----------------------------
-# START CALL API
+# PRESENCE SOCKET
+# -----------------------------
+@app.websocket("/ws/presence/{phone}")
+async def presence_socket(ws: WebSocket, phone: str):
+    await ws.accept()
+    online_users[phone] = ws
+
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        online_users.pop(phone, None)
+
+
+# -----------------------------
+# START CALL
 # -----------------------------
 @app.post("/start-call")
 async def start_call(data: StartCallRequest):
+
+    if data.calleeId not in online_users:
+        return {"error": "User offline"}
 
     call_id = str(uuid.uuid4())
 
@@ -127,16 +145,21 @@ async def start_call(data: StartCallRequest):
         "participants": []
     }
 
-    return {
-        "callId": call_id
-    }
+    # notify callee
+    await online_users[data.calleeId].send_json({
+        "type": "incoming-call",
+        "callId": call_id,
+        "from": data.callerId
+    })
+
+    return {"callId": call_id}
 
 
 # -----------------------------
-# WEBSOCKET SIGNALING
+# CALL SOCKET
 # -----------------------------
 @app.websocket("/ws/{call_id}")
-async def websocket_endpoint(ws: WebSocket, call_id: str):
+async def call_socket(ws: WebSocket, call_id: str):
 
     await ws.accept()
 
@@ -147,46 +170,29 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
     call = calls[call_id]
 
     try:
-        # First message must be JOIN
         join_data = await ws.receive_json()
 
         if join_data.get("type") != "join":
             await ws.close()
             return
 
-        # Add participant
         call["participants"].append(ws)
 
-        # ❌ More than 2 users not allowed
-        if len(call["participants"]) > 2:
-            await ws.send_json({ "type": "room-full" })
-            await ws.close()
-            return
-
-        # ✅ If 2 users connected
         if len(call["participants"]) == 2:
-            caller_ws = call["participants"][0]
+            for peer in call["participants"]:
+                await peer.send_json({"type": "ready"})
 
-            # Tell first user to create offer
-            await caller_ws.send_json({
-                "type": "ready"
-            })
-
-        # -------------------------
-        # SIGNALING RELAY
-        # -------------------------
         while True:
             data = await ws.receive_text()
-
             for peer in call["participants"]:
                 if peer != ws:
                     await peer.send_text(data)
 
     except WebSocketDisconnect:
-        if call_id in calls:
-            calls[call_id]["participants"] = [
-                p for p in calls[call_id]["participants"] if p != ws
-            ]
+        call["participants"] = [
+            p for p in call["participants"] if p != ws
+        ]
 
-            if not calls[call_id]["participants"]:
-                del calls[call_id]
+        if not call["participants"]:
+            del calls[call_id]
+

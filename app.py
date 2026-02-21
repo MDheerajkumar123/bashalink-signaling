@@ -1,7 +1,9 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from twilio.rest import Client
 import uuid
+import os
 
 app = FastAPI()
 
@@ -17,11 +19,34 @@ calls = {}
 online_users = {}
 
 # -----------------------------
-# HEALTH CHECK (🔥 IMPORTANT)
+# HEALTH CHECK
 # -----------------------------
 @app.get("/")
 async def health():
     return {"status": "ok"}
+
+
+# -----------------------------
+# 🔥 TWILIO ICE SERVERS ENDPOINT
+# -----------------------------
+@app.get("/ice-servers")
+async def get_ice_servers():
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+
+    if not account_sid or not auth_token:
+        return {"error": "Twilio credentials not set"}
+
+    try:
+        client = Client(account_sid, auth_token)
+        token = client.tokens.create()
+
+        return {
+            "iceServers": token.ice_servers
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # -----------------------------
@@ -39,11 +64,11 @@ class StartCallRequest(BaseModel):
 async def presence_socket(ws: WebSocket, phone: str):
     await ws.accept()
     online_users[phone] = ws
-    print("User connected:", phone)   # 🔥 for debugging
+    print("User connected:", phone)
 
     try:
         while True:
-            await ws.receive_text()  # receive ping
+            await ws.receive_text()
     except WebSocketDisconnect:
         print("User disconnected:", phone)
         online_users.pop(phone, None)
@@ -66,7 +91,6 @@ async def start_call(data: StartCallRequest):
         "participants": []
     }
 
-    # notify callee
     await online_users[data.calleeId].send_json({
         "type": "incoming-call",
         "callId": call_id,

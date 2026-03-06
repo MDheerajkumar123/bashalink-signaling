@@ -27,7 +27,7 @@ async def health():
 
 
 # -----------------------------
-# 🔥 TWILIO ICE SERVERS ENDPOINT
+# TWILIO ICE SERVERS
 # -----------------------------
 @app.get("/ice-servers")
 async def get_ice_servers():
@@ -41,9 +41,7 @@ async def get_ice_servers():
         client = Client(account_sid, auth_token)
         token = client.tokens.create()
 
-        return {
-            "iceServers": token.ice_servers
-        }
+        return {"iceServers": token.ice_servers}
 
     except Exception as e:
         return {"error": str(e)}
@@ -121,21 +119,48 @@ async def call_socket(ws: WebSocket, call_id: str):
             await ws.close()
             return
 
-        call["participants"].append(ws)
+        language = join_data.get("language")
 
+        # store websocket + language
+        call["participants"].append({
+            "ws": ws,
+            "language": language
+        })
+
+        # when both users join
         if len(call["participants"]) == 2:
-            for peer in call["participants"]:
-                await peer.send_json({"type": "ready"})
 
+            p1 = call["participants"][0]
+            p2 = call["participants"][1]
+
+            # send peer language
+            await p1["ws"].send_json({
+                "type": "peer-language",
+                "language": p2["language"]
+            })
+
+            await p2["ws"].send_json({
+                "type": "peer-language",
+                "language": p1["language"]
+            })
+
+            # notify both ready
+            for p in call["participants"]:
+                await p["ws"].send_json({"type": "ready"})
+
+        # signaling relay
         while True:
             data = await ws.receive_text()
+
             for peer in call["participants"]:
-                if peer != ws:
-                    await peer.send_text(data)
+                if peer["ws"] != ws:
+                    await peer["ws"].send_text(data)
 
     except WebSocketDisconnect:
+
         call["participants"] = [
-            p for p in call["participants"] if p != ws
+            p for p in call["participants"]
+            if p["ws"] != ws
         ]
 
         if not call["participants"]:
